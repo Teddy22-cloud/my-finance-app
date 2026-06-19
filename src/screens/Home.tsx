@@ -1,12 +1,18 @@
+import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { BarChart, Bar, XAxis, ResponsiveContainer, Cell } from 'recharts'
 import { db, getSettings } from '../db'
-import { toETB, fmtETB } from '../lib/money'
+import type { Transaction } from '../types'
+import { toETB, fmtETB, fmt } from '../lib/money'
 import { currentMonthKey, monthKey, monthLabel } from '../lib/date'
 import { projectPayoff, fmtMonthYear } from '../lib/loan'
 import { Card, Stat, SectionTitle } from '../components/ui'
+import { FormSheet } from '../components/FormSheet'
+
+const numU = (v: string) => (v === '' || v == null ? undefined : Number(v))
 
 export function Home() {
+  const [editTx, setEditTx] = useState<Transaction | null>(null)
   const data = useLiveQuery(async () => {
     const settings = await getSettings()
     const [txs, accounts, people, crypto] = await Promise.all([
@@ -22,7 +28,6 @@ export function Home() {
       .reduce((s, p) => s + toETB(p.amount, p.currency, settings, p.fxRate), 0)
     const iOwe = people.filter((p) => p.status === 'Open' && p.direction === 'I owe')
       .reduce((s, p) => s + toETB(p.amount, p.currency, settings, p.fxRate), 0)
-
     const netWorth = liquid + cryptoVal + owedToMe - iOwe - settings.loanBalance
 
     const mk = currentMonthKey()
@@ -30,24 +35,18 @@ export function Home() {
     const monthSpend = monthTxs.reduce((s, t) => s + toETB(t.amount, t.currency, settings, t.fxRate), 0)
 
     const byCat: Record<string, number> = {}
-    for (const t of monthTxs) {
-      byCat[t.category] = (byCat[t.category] ?? 0) + toETB(t.amount, t.currency, settings, t.fxRate)
-    }
-    const chart = Object.entries(byCat)
-      .map(([category, value]) => ({ category, value: Math.round(value) }))
-      .sort((a, b) => b.value - a.value)
+    for (const t of monthTxs) byCat[t.category] = (byCat[t.category] ?? 0) + toETB(t.amount, t.currency, settings, t.fxRate)
+    const chart = Object.entries(byCat).map(([category, value]) => ({ category, value: Math.round(value) })).sort((a, b) => b.value - a.value)
 
-    const payment = settings.loanAutoDebit + settings.loanExtra
-    const payoff = projectPayoff(settings.loanBalance, payment, settings.loanRate)
+    const recent = [...txs].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : (b.id ?? 0) - (a.id ?? 0))).slice(0, 12)
 
-    return { settings, liquid, cryptoVal, netWorth, monthSpend, chart, payoff, payment }
+    const payoff = projectPayoff(settings.loanBalance, settings.loanAutoDebit + settings.loanExtra, settings.loanRate)
+    return { settings, liquid, netWorth, monthSpend, chart, recent, payoff, accounts }
   }, [])
 
   if (!data) return <div className="p-6 text-slate-400">Loading…</div>
-
-  const { settings, liquid, netWorth, monthSpend, chart, payoff } = data
-  const start = 1913275 // reference original; use balance if higher
-  const origin = Math.max(start, settings.loanBalance)
+  const { settings, liquid, netWorth, monthSpend, chart, recent, payoff, accounts } = data
+  const origin = Math.max(1913275, settings.loanBalance)
   const paidPct = origin > 0 ? Math.round((1 - settings.loanBalance / origin) * 100) : 0
   const palette = ['#0f766e', '#14b8a6', '#0ea5e9', '#6366f1', '#f59e0b', '#ef4444', '#ec4899', '#84cc16']
 
@@ -82,6 +81,24 @@ export function Home() {
         )}
       </Card>
 
+      <SectionTitle>Recent transactions</SectionTitle>
+      <div className="space-y-2">
+        {recent.length === 0 && <p className="text-slate-400 text-sm px-1">Nothing yet — tap Add to log your first.</p>}
+        {recent.map((t) => (
+          <Card key={t.id} className="py-3 active:bg-slate-50">
+            <button className="w-full flex justify-between items-center text-left" onClick={() => setEditTx(t)}>
+              <div>
+                <div className="font-medium">{t.name}</div>
+                <div className="text-xs text-slate-400">{t.date} · {t.category} · {t.type}</div>
+              </div>
+              <div className={`font-semibold ${t.type === 'Income' ? 'text-emerald-600' : ''}`}>
+                {t.type === 'Income' ? '+' : '-'}{fmt(t.amount, t.currency)}
+              </div>
+            </button>
+          </Card>
+        ))}
+      </div>
+
       <SectionTitle>Car loan</SectionTitle>
       <Card>
         <div className="flex justify-between items-baseline">
@@ -96,6 +113,33 @@ export function Home() {
         </div>
         <div className="text-xs text-slate-400 mt-1">{paidPct}% paid off{payoff.neverPaysOff ? '' : ` · ~${payoff.months} months left`}</div>
       </Card>
+
+      {editTx && (
+        <FormSheet
+          title="Edit transaction"
+          fields={[
+            { key: 'name', label: 'Description', type: 'text' },
+            { key: 'amount', label: 'Amount', type: 'number', step: 'any' },
+            { key: 'currency', label: 'Currency', type: 'select', options: ['ETB', 'USD', 'EUR'] },
+            { key: 'type', label: 'Type', type: 'select', options: ['Expense', 'Income', 'Transfer', 'Loan payment'] },
+            { key: 'category', label: 'Category', type: 'select', options: settings.categories },
+            { key: 'account', label: 'Account', type: 'select', options: accounts.map((a) => a.name) },
+            { key: 'date', label: 'Date', type: 'date' },
+            { key: 'note', label: 'Note', type: 'text', optional: true },
+          ]}
+          initial={{
+            name: editTx.name, amount: String(editTx.amount), currency: editTx.currency, type: editTx.type,
+            category: editTx.category, account: editTx.account, date: editTx.date, note: editTx.note ?? '',
+          }}
+          onClose={() => setEditTx(null)}
+          onSave={(v) => db.transactions.update(editTx.id!, {
+            name: v.name || v.category, amount: Number(v.amount), currency: v.currency as Transaction['currency'],
+            type: v.type as Transaction['type'], category: v.category, account: v.account, date: v.date,
+            fxRate: numU(v.fxRate), note: v.note || undefined,
+          })}
+          onDelete={() => db.transactions.delete(editTx.id!)}
+        />
+      )}
     </div>
   )
 }

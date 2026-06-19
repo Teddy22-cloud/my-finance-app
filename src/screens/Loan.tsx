@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db, getSettings } from '../db'
-import type { PaymentType } from '../types'
+import type { LoanPayment, PaymentType } from '../types'
 import { fmtETB } from '../lib/money'
 import { projectPayoff, fmtMonthYear } from '../lib/loan'
 import { todayISO } from '../lib/date'
 import { Card, Stat, SectionTitle, Field, inputClass, Chip } from '../components/ui'
+import { FormSheet } from '../components/FormSheet'
 
 const PT: PaymentType[] = ['Auto-debit', 'Extra', 'Statement']
 
@@ -13,6 +14,7 @@ export function Loan() {
   const settings = useLiveQuery(() => getSettings(), [])
   const payments = useLiveQuery(() => db.loanPayments.orderBy('date').reverse().toArray(), [])
   const [extra, setExtra] = useState<number | null>(null)
+  const [editPay, setEditPay] = useState<LoanPayment | null>(null)
   const [form, setForm] = useState({ amount: '', paymentType: 'Auto-debit' as PaymentType, date: todayISO(), note: '' })
 
   if (!settings) return <div className="p-6 text-slate-400">Loading…</div>
@@ -97,15 +99,44 @@ export function Loan() {
       <div className="space-y-2">
         {(payments ?? []).length === 0 && <p className="text-slate-400 text-sm px-1">No payments logged yet.</p>}
         {payments?.map((p) => (
-          <Card key={p.id} className="flex justify-between items-center py-3">
-            <div>
-              <div className="font-medium">{p.paymentType}</div>
-              <div className="text-xs text-slate-400">{p.date}{p.note ? ` · ${p.note}` : ''}</div>
-            </div>
-            <div className="font-semibold">{fmtETB(p.amount)}</div>
+          <Card key={p.id} className="py-3 active:bg-slate-50">
+            <button className="w-full flex justify-between items-center text-left" onClick={() => setEditPay(p)}>
+              <div>
+                <div className="font-medium">{p.paymentType}</div>
+                <div className="text-xs text-slate-400">{p.date}{p.note ? ` · ${p.note}` : ''}</div>
+              </div>
+              <div className="font-semibold">{fmtETB(p.amount)}</div>
+            </button>
           </Card>
         ))}
       </div>
+
+      {editPay && (
+        <FormSheet
+          title="Edit payment"
+          fields={[
+            { key: 'paymentType', label: 'Type', type: 'select', options: PT },
+            { key: 'amount', label: 'Amount (ETB)', type: 'number' },
+            { key: 'date', label: 'Date', type: 'date' },
+            { key: 'note', label: 'Note', type: 'text', optional: true },
+          ]}
+          initial={{ paymentType: editPay.paymentType, amount: String(editPay.amount), date: editPay.date, note: editPay.note ?? '' }}
+          onClose={() => setEditPay(null)}
+          onSave={async (v) => {
+            const newAmt = Number(v.amount)
+            const delta = newAmt - editPay.amount // extra paid -> balance drops further
+            await db.loanPayments.update(editPay.id!, {
+              paymentType: v.paymentType as PaymentType, amount: newAmt, date: v.date, note: v.note || undefined,
+            })
+            await db.settings.update(1, { loanBalance: Math.max(0, settings!.loanBalance - delta) })
+          }}
+          onDelete={async () => {
+            // Removing a payment puts that amount back onto the balance.
+            await db.loanPayments.delete(editPay.id!)
+            await db.settings.update(1, { loanBalance: settings!.loanBalance + editPay.amount })
+          }}
+        />
+      )}
     </div>
   )
 }
